@@ -19,52 +19,11 @@ class Sae(nn.Module):
     def collect_activations(self):
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
         activations = []
-        processed_count = 0
-        error_count = 0
-        empty_count = 0
-        
         for sample in tqdm(dataset, desc="Coletando ativações"):
             text = sample["text"]
-            if not text or not text.strip():
-                empty_count += 1
-                continue
-            try:
-                # Debug: print first few texts that aren't empty
-                if processed_count == 0:
-                    print(f"First valid text sample: '{text[:100]}...'")
-                
-                token_acts = self.llm.get_activations(text)
-                print(f"Got token_acts: {type(token_acts)}, length: {len(token_acts) if token_acts is not None else 'None'}")
-                
-                if token_acts is not None and len(token_acts) > 0:
-                    for token_act in token_acts:
-                        activations.append(token_act)
-                    processed_count += 1
-                
-                # Limit to avoid memory issues - collect only first 10000 activations
-                if len(activations) >= 10000:
-                    break
-                    
-            except RuntimeError as e:
-                # Debug: print the actual error for the first few
-                if error_count < 5:
-                    print(f"RuntimeError {error_count + 1}: {str(e)}")
-                    print(f"Text causing error: '{text[:50]}...'")
-                error_count += 1
-                continue
-            except Exception as e:
-                # Catch any other errors
-                if error_count < 5:
-                    print(f"Other error: {type(e).__name__}: {str(e)}")
-                error_count += 1
-                continue
-        
-        print(f"Processed: {processed_count}, Empty: {empty_count}, Errors: {error_count}")
-        print(f"Total activations collected: {len(activations)}")
-        
-        if len(activations) == 0:
-            raise ValueError("No activations collected. Check your LLM implementation.")
-        
+            token_acts = self.llm.get_activations(text)
+            for token_act in token_acts:
+                activations.append(token_act)
         return torch.stack(activations)
    
     def apply_sparsity(self, latents):
@@ -84,7 +43,6 @@ class Sae(nn.Module):
         
     def train(self, epochs=5, batch_size=64, lr=1e-3, device="cuda"):
         self.to(device)
-        self.llm.model.to(device)
         activations = self.collect_activations()
         dataset = torch.utils.data.TensorDataset(activations)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)

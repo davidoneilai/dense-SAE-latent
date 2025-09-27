@@ -9,8 +9,19 @@ class Llm:
         self.model.to("cuda")
         
     def get_activations(self, text):
+        if not text or not text.strip():
+            return torch.empty(0, 768, device="cuda")
+              
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=64)
+        inputs = {k: v.to("cuda") for k, v in inputs.items()}
+        
+        if inputs['input_ids'].size(1) == 0:
+            return torch.empty(0, 768, device="cuda")
+            
         with torch.no_grad():
             outputs = self.model(**inputs)
-        hidden_states = outputs.hidden_states[-1]
-        return hidden_states.squeeze(0)
+            
+        hidden_states = outputs.hidden_states[-1]  # Shape: [batch, seq_len, hidden_size]
+        result = hidden_states.squeeze(0)  # Remove batch dimension: [seq_len, hidden_size]
+        
+        return result

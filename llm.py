@@ -21,7 +21,7 @@ class Llm:
         with torch.no_grad():
             outputs = self.model(**inputs)
             
-        hidden_states = outputs.hidden_states[-1]  # Shape: [batch, seq_len, hidden_size]
-        result = hidden_states.squeeze(0)  # Remove batch dimension: [seq_len, hidden_size]
+        hidden_states = outputs.hidden_states[-1] 
+        result = hidden_states.squeeze(0) 
         
         return result

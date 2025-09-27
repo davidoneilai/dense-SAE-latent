@@ -43,6 +43,10 @@ class Sae(nn.Module):
             
             for token_act in token_acts:
                 activations.append(token_act)
+            
+            if samples_processed >= len(dataset) * 0.3:
+                print(f"Parando em 30% do dataset...")
+                break
                 
         print(f"processadas: {samples_processed}")
         print(f"não vazias: {non_empty_samples}")
@@ -71,7 +75,10 @@ class Sae(nn.Module):
         return F.mse_loss(recons, target)
     
     def evaluate_metrics(self, test_data, device="cuda"):
-        self.eval()
+        """
+        Calcula métricas importantes para avaliar a qualidade do SAE
+        """
+        nn.Module.eval(self)
         self.to(device)
         
         with torch.no_grad():
@@ -134,7 +141,7 @@ class Sae(nn.Module):
     
     def analyze_top_features(self, test_data, top_k=10, device="cuda"):
         """Analisa as features mais ativas"""
-        self.eval()
+        nn.Module.eval(self)
         self.to(device)
         
         with torch.no_grad():
@@ -168,7 +175,9 @@ class Sae(nn.Module):
                 'top_frequency_features': top_frequency_idx
             }
         
-    def train(self, epochs=5, batch_size=64, lr=1e-3, device="cuda", eval_split=0.1):
+    def train_sae(self, epochs=5, batch_size=64, lr=1e-3, device="cuda", eval_split=0.1):
+        torch.cuda.empty_cache()
+        
         self.to(device)
         activations = self.collect_activations()
         n_test = int(len(activations) * eval_split)
@@ -184,9 +193,13 @@ class Sae(nn.Module):
         train_dataset = torch.utils.data.TensorDataset(torch.stack([train_data[i] for i in range(len(train_data))]))
         dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         optimizer = optim.Adam(self.parameters(), lr=lr)
-        
+        print(f"batches por época: {len(dataloader)}")
+
         for epoch in range(epochs):
+            print(f"\nÉpoca {epoch+1}/{epochs}")
             total_loss = 0.0
+            batch_count = 0
+            
             for batch in dataloader:
                 x = batch[0].to(device)
                 recons = self(x)
@@ -195,11 +208,17 @@ class Sae(nn.Module):
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
+                batch_count += 1
+                
+                if batch_count % 1000 == 0:
+                    current_loss = total_loss / batch_count
+                    progress = (batch_count / len(dataloader)) * 100
+                    print(f"batch {batch_count}/{len(dataloader)} ({progress:.1f}%) - Loss atual: {current_loss:.6f}")
                 
             media_loss = total_loss / len(dataloader)
-            print(f"Epoch {epoch+1}/{epochs} - Loss: {media_loss:.6f}")
+            print(f"epoca {epoch+1} completa - Loss final: {media_loss:.6f}")
         
-        print("\n métricas no conjunto de teste...")
+        print("\n métricas no conjunto de teste")
         metrics = self.evaluate_metrics(test_tensor, device)
         self.print_metrics(metrics)
         feature_analysis = self.analyze_top_features(test_tensor, top_k=15, device=device)
@@ -207,6 +226,6 @@ class Sae(nn.Module):
         return metrics, feature_analysis
             
 sae = Sae()
-metrics, features = sae.train(epochs=10, batch_size=64, lr=1e-3, device="cuda")
+metrics, features = sae.train_sae(epochs=10, batch_size=32, lr=1e-3, device="cuda")
         
         

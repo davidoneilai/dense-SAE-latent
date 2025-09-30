@@ -82,6 +82,31 @@ class Sae(nn.Module):
     
     def loss(self, recons, target):
         return F.mse_loss(recons, target)
+
+    @torch.no_grad()
+    def quick_kpis(self, data_tensor: torch.Tensor, device="cuda"):
+        self.eval().to(device)
+        x = data_tensor.to(device)
+        recons = self(x)
+
+        mse = F.mse_loss(recons, x).item()
+        cos = F.cosine_similarity(x, recons, dim=-1).mean().item()
+        ss_res = torch.sum((x - recons) ** 2)
+        ss_tot = torch.sum((x - x.mean()) ** 2)
+        r2 = (1 - ss_res / ss_tot).item()
+
+        z = self.encoder(x)
+        z_sparse = self.apply_sparsity(z)
+        feature_usage_frac = (z_sparse != 0).any(dim=0).float().mean().item()
+        l0_avg = (z_sparse != 0).sum(dim=-1).float().mean().item()
+
+        return {
+            "mse": mse,
+            "cos": cos,
+            "r2": r2,
+            "feature_usage_frac": feature_usage_frac,
+            "l0_avg": l0_avg
+        }
     
     @torch.no_grad()
     def recon_loss(self, data_tensor: torch.Tensor, device="cuda"):
@@ -167,7 +192,8 @@ class Sae(nn.Module):
         
     def train_sae(self, epochs=5, batch_size=64, lr=1e-3, device="cuda",
               eval_split=0.1, prune_pct=0.0, saliency_sample_size=0,
-              recovery_epochs=2, recovery_lr=3e-4):
+              recovery_epochs=2, recovery_lr=3e-4,
+              rank_sample_size=8000):
         torch.cuda.empty_cache()
         
         self.to(device)
@@ -206,25 +232,33 @@ class Sae(nn.Module):
         pre_loss = self.recon_loss(test_tensor, device=device)
         print(f"\n[CHECK] Recon MSE (pré-pruning): {pre_loss:.6f}")
 
+        pre = self.quick_kpis(test_tensor, device)
+        print(f"\n[CHECK] Pré-pruning | MSE: {pre['mse']:.6f} | Cos: {pre['cos']:.4f} | R²: {pre['r2']:.4f} | Uso-features: {pre['feature_usage_frac']:.3f}")
+
         results = {
-            "pre_loss": pre_loss,
+            "pre_loss": pre["mse"],
             "post_loss": None,
             "num_pruned": 0,
             "total_neurons": self.encoder.weight.shape[0],
-            "prune_idx": None
+            "prune_idx": None,
+            "pre_kpis": pre,
+            "post_kpis": None,
         }
 
         # Pruning opcional
         if prune_pct > 0.0:
             sample_acts = train_tensor
-            if 0 < saliency_sample_size < len(train_tensor):
-                idx = torch.randperm(len(train_tensor))[:saliency_sample_size]
+            if 0 < rank_sample_size < len(train_tensor):
+                g_cpu = torch.Generator().manual_seed(42)
+                idx = torch.randperm(len(train_tensor), generator=g_cpu)[:rank_sample_size]
                 sample_acts = train_tensor[idx]
-
-            print(f"\n[RANK] calculando importâncias (saliency={'on' if saliency_sample_size>0 else 'off'})...")
-            order, _ = self.rank_neurons(sample_acts, use_saliency=(saliency_sample_size>0), device=device)
+            use_sal = saliency_sample_size > 0
+            print(f"\n[RANK] calculando importâncias (N={len(sample_acts)}, saliency={'on' if use_sal else 'off'})...")
+            order, _ = self.rank_neurons(sample_acts, use_saliency=use_sal, device=device)
             num_prune = int(order.numel() * prune_pct)
             prune_idx = order[:num_prune]
+            pre = self.quick_kpis(self, test_tensor, device)
+            
             print(f"[PRUNE] removendo {num_prune}/{order.numel()} neurônios ({prune_pct*100:.1f}%)")
             self.prune_neurons(prune_idx)
 
@@ -233,14 +267,20 @@ class Sae(nn.Module):
                 torch.utils.data.TensorDataset(train_tensor),
                 batch_size=batch_size, epochs=recovery_epochs, lr=recovery_lr, device=device
             )
+            
+            post = self.quick_kpis(test_tensor, device)
+            print(f"[CHECK] Pós-pruning  | MSE: {post['mse']:.6f} | Cos: {post['cos']:.4f} | R²: {post['r2']:.4f} | Uso-features: {post['feature_usage_frac']:.3f}")
+            print(f"[DELTA] ΔMSE: {post['mse'] - pre['mse']:+.6f} | ΔCos: {post['cos'] - pre['cos']:+.4f} | ΔR²: {post['r2'] - pre['r2']:+.4f}")
 
             post_loss = self.recon_loss(test_tensor, device=device)
             print(f"[CHECK] Recon MSE (pós-pruning): {post_loss:.6f}")
 
+
             results.update({
-                "post_loss": post_loss,
+                "post_loss": post["mse"],
                 "num_pruned": num_prune,
-                "prune_idx": prune_idx.detach().cpu()
+                "prune_idx": prune_idx.detach().cpu(),
+                "post_kpis": post,
             })
 
         return results

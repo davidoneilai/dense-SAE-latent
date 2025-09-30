@@ -216,10 +216,10 @@ class Sae(nn.Module):
 
         # Pruning opcional
         if prune_pct > 0.0:
-            sample_acts = test_tensor
-            if 0 < saliency_sample_size < len(test_tensor):
-                idx = torch.randperm(len(test_tensor))[:saliency_sample_size]
-                sample_acts = test_tensor[idx]
+            sample_acts = train_tensor
+            if 0 < saliency_sample_size < len(train_tensor):
+                idx = torch.randperm(len(train_tensor))[:saliency_sample_size]
+                sample_acts = train_tensor[idx]
 
             print(f"\n[RANK] calculando importâncias (saliency={'on' if saliency_sample_size>0 else 'off'})...")
             order, _ = self.rank_neurons(sample_acts, use_saliency=(saliency_sample_size>0), device=device)

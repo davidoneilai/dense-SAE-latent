@@ -232,7 +232,7 @@ class Sae(nn.Module):
         pre_loss = self.recon_loss(test_tensor, device=device)
         print(f"\n[CHECK] Recon MSE (pré-pruning): {pre_loss:.6f}")
 
-        pre = self.quick_kpis(test_tensor, device)
+        pre = self.quick_kpis(test_tensor, device=device)
         print(f"\n[CHECK] Pré-pruning | MSE: {pre['mse']:.6f} | Cos: {pre['cos']:.4f} | R²: {pre['r2']:.4f} | Uso-features: {pre['feature_usage_frac']:.3f}")
 
         results = {
@@ -257,8 +257,7 @@ class Sae(nn.Module):
             order, _ = self.rank_neurons(sample_acts, use_saliency=use_sal, device=device)
             num_prune = int(order.numel() * prune_pct)
             prune_idx = order[:num_prune]
-            pre = self.quick_kpis(self, test_tensor, device)
-            
+                        
             print(f"[PRUNE] removendo {num_prune}/{order.numel()} neurônios ({prune_pct*100:.1f}%)")
             self.prune_neurons(prune_idx)
 
@@ -268,7 +267,7 @@ class Sae(nn.Module):
                 batch_size=batch_size, epochs=recovery_epochs, lr=recovery_lr, device=device
             )
             
-            post = self.quick_kpis(test_tensor, device)
+            post = self.quick_kpis(test_tensor, device=device)
             print(f"[CHECK] Pós-pruning  | MSE: {post['mse']:.6f} | Cos: {post['cos']:.4f} | R²: {post['r2']:.4f} | Uso-features: {post['feature_usage_frac']:.3f}")
             print(f"[DELTA] ΔMSE: {post['mse'] - pre['mse']:+.6f} | ΔCos: {post['cos'] - pre['cos']:+.4f} | ΔR²: {post['r2'] - pre['r2']:+.4f}")
 

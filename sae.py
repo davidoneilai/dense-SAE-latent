@@ -15,14 +15,6 @@ class Sae(nn.Module):
         self.encoder = nn.Linear(768, 12288)
         self.decoder = nn.Linear(12288, 768)
         self.k = 20
-        self.default_dataloader_config = {
-            'shuffle': True
-        }
-    
-    def create_dataloader(self, dataset, batch_size, **kwargs):
-        config = self.default_dataloader_config.copy()
-        config.update(kwargs)
-        return DataLoader(dataset, batch_size=batch_size, **config)
 
     def collect_activations(self):
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
@@ -69,8 +61,7 @@ class Sae(nn.Module):
    
     def apply_sparsity(self, latents):
         #vou ser fiel ao paper e usar top_k, mas posso usar uma relu + regu dps
-        k = min(self.k, latents.shape[-1])
-        values, indices = torch.topk(latents, k=k, dim=-1)  
+        values, indices = torch.topk(latents, k=20, dim=-1)  
         mask = torch.zeros_like(latents).scatter_(-1, indices, 1.0)
         return latents * mask
     
@@ -82,216 +73,159 @@ class Sae(nn.Module):
     
     def loss(self, recons, target):
         return F.mse_loss(recons, target)
-
-    @torch.no_grad()
-    def quick_kpis(self, data_tensor: torch.Tensor, device="cuda"):
-        self.eval().to(device)
-        x = data_tensor.to(device)
-        recons = self(x)
-
-        mse = F.mse_loss(recons, x).item()
-        cos = F.cosine_similarity(x, recons, dim=-1).mean().item()
-        ss_res = torch.sum((x - recons) ** 2)
-        ss_tot = torch.sum((x - x.mean()) ** 2)
-        r2 = (1 - ss_res / ss_tot).item()
-
-        z = self.encoder(x)
-        z_sparse = self.apply_sparsity(z)
-        feature_usage_frac = (z_sparse != 0).any(dim=0).float().mean().item()
-        l0_avg = (z_sparse != 0).sum(dim=-1).float().mean().item()
-
-        return {
-            "mse": mse,
-            "cos": cos,
-            "r2": r2,
-            "feature_usage_frac": feature_usage_frac,
-            "l0_avg": l0_avg
-        }
     
-    @torch.no_grad()
-    def recon_loss(self, data_tensor: torch.Tensor, device="cuda"):
-        self.eval().to(device)
-        x = data_tensor.to(device)
-        recons = self(x)
-        return F.mse_loss(recons, x).item()
-    
-    # Importância do neurônio ---
-    def neuron_importance_structural(self):
-        with torch.no_grad():
-            enc = self.encoder.weight.data      # [out=12288, in=768]
-            dec = self.decoder.weight.data      # [out=768, in=12288]
-            enc_col = torch.norm(enc, dim=1)    # [12288]
-            dec_row = torch.norm(dec, dim=0)    # [12288]
-            imp = enc_col * dec_row             # [12288]
-        return imp
-
-    def neuron_importance_usage(self, sample_acts: torch.Tensor, device="cuda"):
-        self.eval()
-        with torch.no_grad():
-            z = self.encoder(sample_acts.to(device))      # [N, 12288]
-            z_sparse = self.apply_sparsity(z)
-            freq = (z_sparse != 0).float().mean(dim=0)    # [12288]
-            act  = z_sparse.abs().mean(dim=0)             # [12288]
-            imp = torch.sqrt((freq + 1e-8) * (act + 1e-8))
-        return imp, freq, act
-
-    def neuron_importance_saliency(self, sample_acts: torch.Tensor, device="cuda"):
-        self.train().to(device)
-        x = sample_acts.to(device)
-        z = self.encoder(x)                                # [N, 12288]
-        z.retain_grad()
-        z_sparse = self.apply_sparsity(z)
-        recons = self.decoder(z_sparse)
-        loss = F.mse_loss(recons, x)
-        self.zero_grad(set_to_none=True)
-        loss.backward()
-        sal = (z.grad.abs() * z.abs()).mean(dim=0).detach()   # [12288]
-        return sal
-    
-    # Combinação e ranking ---
-    def _zscore(self, t: torch.Tensor):
-        m, s = t.mean(), t.std().clamp_min(1e-8)
-        return (t - m) / s
-
-    def rank_neurons(self, sample_acts: torch.Tensor, use_saliency=True, device="cuda",
-                    weights=(0.4, 0.4, 0.2)):
-        w_struct, w_usage, w_sal = weights
-        s_struct = self.neuron_importance_structural().to(device)      # ↑ melhor
-        s_usage, _, _ = self.neuron_importance_usage(sample_acts, device=device)
-        if use_saliency:
-            s_sal = self.neuron_importance_saliency(sample_acts, device=device)
-        else:
-            s_sal = torch.zeros_like(s_struct)
-
-        score = w_struct * self._zscore(s_struct) + w_usage * self._zscore(s_usage) + w_sal * self._zscore(s_sal)
-        # menor score = menos importante → candidatos a poda
-        order = torch.argsort(score)  # ascendente
-        return order, score
-    
-    # pruning e recuperação
-    def prune_neurons(self, prune_idx: torch.Tensor):
-        with torch.no_grad():
-            self.encoder.weight.data[prune_idx, :] = 0.0
-            if self.encoder.bias is not None:
-                self.encoder.bias.data[prune_idx] = 0.0
-            self.decoder.weight.data[:, prune_idx] = 0.0
-
-    def recover_after_prune(self, train_dataset, batch_size=64, epochs=2, lr=3e-4, device="cuda"):
-        loader = self.create_dataloader(train_dataset, batch_size)
-        opt = optim.Adam(self.parameters(), lr=lr)
-        self.train().to(device)
-        for _ in range(epochs):
-            for (x,) in loader:
-                x = x.to(device)
-                recons = self(x)
-                loss = self.loss(recons, x)
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
-
+    def evaluate_metrics(self, test_data, device="cuda"):
+        """
+        Calcula métricas importantes para avaliar a qualidade do SAE
+        """
+        nn.Module.eval(self)
+        self.to(device)
         
-    def train_sae(self, epochs=5, batch_size=64, lr=1e-3, device="cuda",
-              eval_split=0.1, prune_pct=0.0, saliency_sample_size=0,
-              recovery_epochs=2, recovery_lr=3e-4,
-              rank_sample_size=8000):
+        with torch.no_grad():
+            test_data = test_data.to(device)
+            latents = self.encoder(test_data)
+            latents_sparse = self.apply_sparsity(latents)
+            recons = self.decoder(latents_sparse)
+            recon_loss = F.mse_loss(recons, test_data).item()
+            active_neurons = (latents_sparse != 0).float().mean().item()
+            sparsity_pct = active_neurons * 100
+            l0_norm = (latents_sparse != 0).float().sum(dim=-1).mean().item()
+            ss_res = torch.sum((test_data - recons) ** 2)
+            ss_tot = torch.sum((test_data - test_data.mean()) ** 2)
+            r2_score = 1 - (ss_res / ss_tot).item()
+            cos_sim = F.cosine_similarity(test_data, recons, dim=-1).mean().item()
+            feature_usage = (latents_sparse != 0).float().mean(dim=0)
+            dead_features = (feature_usage == 0).sum().item()
+            active_features = (feature_usage > 0).sum().item()
+            per_dim_error = ((test_data - recons) ** 2).mean(dim=0)
+            max_error_dim = per_dim_error.max().item()
+            min_error_dim = per_dim_error.min().item()
+            
+            metrics = {
+                'reconstruction_loss': recon_loss,
+                'sparsity_percent': sparsity_pct,
+                'l0_norm': l0_norm,
+                'r2_score': r2_score,
+                'cosine_similarity': cos_sim,
+                'active_features': active_features,
+                'dead_features': dead_features,
+                'total_features': latents_sparse.shape[-1],
+                'max_error_dim': max_error_dim,
+                'min_error_dim': min_error_dim,
+                'feature_usage_std': feature_usage.std().item()
+            }
+            
+        return metrics
+    
+    def print_metrics(self, metrics):
+        print("\n" + "="*50)
+        print("         MÉTRICAS DO SAE")
+        print("="*50)
+        print(f"Reconstruction Loss (MSE): {metrics['reconstruction_loss']:.6f}")
+        print(f"R² Score:                  {metrics['r2_score']:.4f}")
+        print(f"Cosine Similarity:         {metrics['cosine_similarity']:.4f}")
+        print()
+        print("--- SPARSITY ---")
+        print(f"Sparsity Level:            {metrics['sparsity_percent']:.2f}%")
+        print(f"L0 Norm (avg active):      {metrics['l0_norm']:.1f}")
+        print()
+        print("--- FEATURES ---")
+        print(f"Active Features:           {metrics['active_features']}/{metrics['total_features']}")
+        print(f"Dead Features:             {metrics['dead_features']}")
+        print(f"Feature Usage Std:         {metrics['feature_usage_std']:.4f}")
+        print()
+        print("--- RECONSTRUCTION ---")
+        print(f"Max Error (dimension):     {metrics['max_error_dim']:.6f}")
+        print(f"Min Error (dimension):     {metrics['min_error_dim']:.6f}")
+        print("="*50)
+    
+    def analyze_top_features(self, test_data, top_k=10, device="cuda"):
+        """Analisa as features mais ativas"""
+        nn.Module.eval(self)
+        self.to(device)
+        
+        with torch.no_grad():
+            test_data = test_data.to(device)
+            latents = self.encoder(test_data)
+            latents_sparse = self.apply_sparsity(latents)
+
+            feature_activations = latents_sparse.abs().mean(dim=0)  
+            feature_frequency = (latents_sparse != 0).float().mean(dim=0)
+            
+            top_activation_idx = feature_activations.topk(top_k).indices
+            
+            top_frequency_idx = feature_frequency.topk(top_k).indices
+            
+            print(f"\n{'='*60}")
+            print(f"           TOP {top_k} FEATURES ANALYSIS")
+            print(f"{'='*60}")
+            
+            print(f"\n--- TOP {top_k} POR ATIVAÇÃO MÉDIA ---")
+            for i, idx in enumerate(top_activation_idx):
+                print(f"feature {idx:4d}: ativação={feature_activations[idx]:.4f}, frequência={feature_frequency[idx]:.4f}")
+            
+            print(f"\n--- TOP {top_k} POR FREQUÊNCIA ---")
+            for i, idx in enumerate(top_frequency_idx):
+                print(f"feature {idx:4d}: frequência={feature_frequency[idx]:.4f}, ativação={feature_activations[idx]:.4f}")
+            
+            return {
+                'feature_activations': feature_activations,
+                'feature_frequency': feature_frequency,
+                'top_activation_features': top_activation_idx,
+                'top_frequency_features': top_frequency_idx
+            }
+        
+    def train_sae(self, epochs=5, batch_size=64, lr=1e-3, device="cuda", eval_split=0.1):
         torch.cuda.empty_cache()
         
         self.to(device)
         activations = self.collect_activations()
         n_test = int(len(activations) * eval_split)
         n_train = len(activations) - n_test
-        train_data, test_data = torch.utils.data.random_split(activations, [n_train, n_test])
+        
+        train_data, test_data = torch.utils.data.random_split(
+            activations, [n_train, n_test]
+        )
         
         print(f"treino: {n_train}, teste: {n_test}")
         test_tensor = torch.stack([test_data[i] for i in range(len(test_data))])
-        train_tensor = torch.stack([train_data[i] for i in range(len(train_data))])
         
-        train_dataset = torch.utils.data.TensorDataset(train_tensor)
-        dataloader = self.create_dataloader(train_dataset, batch_size)
-        
+        train_dataset = torch.utils.data.TensorDataset(torch.stack([train_data[i] for i in range(len(train_data))]))
+        dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         optimizer = optim.Adam(self.parameters(), lr=lr)
         print(f"batches por época: {len(dataloader)}")
 
         for epoch in range(epochs):
-            self.train()
+            print(f"\nÉpoca {epoch+1}/{epochs}")
             total_loss = 0.0
-            for bi, (x,) in enumerate(dataloader, 1):
-                x = x.to(device)
+            batch_count = 0
+            
+            for batch in dataloader:
+                x = batch[0].to(device)
                 recons = self(x)
                 loss = self.loss(recons, x)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
+                batch_count += 1
                 
-                if bi % 1000 == 0:
-                    print(f"epoch {epoch+1} | batch {bi}/{len(dataloader)} - loss {total_loss/bi:.6f}")
-
-            print(f"época {epoch+1} completa - loss médio: {total_loss/len(dataloader):.6f}")
+                if batch_count % 1000 == 0:
+                    current_loss = total_loss / batch_count
+                    progress = (batch_count / len(dataloader)) * 100
+                    print(f"batch {batch_count}/{len(dataloader)} ({progress:.1f}%) - Loss atual: {current_loss:.6f}")
+                
+            media_loss = total_loss / len(dataloader)
+            print(f"epoca {epoch+1} completa - Loss final: {media_loss:.6f}")
         
-        pre_loss = self.recon_loss(test_tensor, device=device)
-        print(f"\n[CHECK] Recon MSE (pré-pruning): {pre_loss:.6f}")
-
-        pre = self.quick_kpis(test_tensor, device=device)
-        print(f"\n[CHECK] Pré-pruning | MSE: {pre['mse']:.6f} | Cos: {pre['cos']:.4f} | R²: {pre['r2']:.4f} | Uso-features: {pre['feature_usage_frac']:.3f}")
-
-        results = {
-            "pre_loss": pre["mse"],
-            "post_loss": None,
-            "num_pruned": 0,
-            "total_neurons": self.encoder.weight.shape[0],
-            "prune_idx": None,
-            "pre_kpis": pre,
-            "post_kpis": None,
-        }
-
-        # Pruning opcional
-        if prune_pct > 0.0:
-            sample_acts = train_tensor
-            if 0 < rank_sample_size < len(train_tensor):
-                g_cpu = torch.Generator().manual_seed(42)
-                idx = torch.randperm(len(train_tensor), generator=g_cpu)[:rank_sample_size]
-                sample_acts = train_tensor[idx]
-            use_sal = saliency_sample_size > 0
-            print(f"\n[RANK] calculando importâncias (N={len(sample_acts)}, saliency={'on' if use_sal else 'off'})...")
-            order, _ = self.rank_neurons(sample_acts, use_saliency=use_sal, device=device)
-            num_prune = int(order.numel() * prune_pct)
-            prune_idx = order[:num_prune]
-                        
-            print(f"[PRUNE] removendo {num_prune}/{order.numel()} neurônios ({prune_pct*100:.1f}%)")
-            self.prune_neurons(prune_idx)
-
-            print(f"[RECOVERY] {recovery_epochs} épocas @ lr={recovery_lr}")
-            self.recover_after_prune(
-                torch.utils.data.TensorDataset(train_tensor),
-                batch_size=batch_size, epochs=recovery_epochs, lr=recovery_lr, device=device
-            )
+        print("\n métricas no conjunto de teste")
+        metrics = self.evaluate_metrics(test_tensor, device)
+        self.print_metrics(metrics)
+        feature_analysis = self.analyze_top_features(test_tensor, top_k=15, device=device)
+        
+        return metrics, feature_analysis
             
-            post = self.quick_kpis(test_tensor, device=device)
-            print(f"[CHECK] Pós-pruning  | MSE: {post['mse']:.6f} | Cos: {post['cos']:.4f} | R²: {post['r2']:.4f} | Uso-features: {post['feature_usage_frac']:.3f}")
-            print(f"[DELTA] ΔMSE: {post['mse'] - pre['mse']:+.6f} | ΔCos: {post['cos'] - pre['cos']:+.4f} | ΔR²: {post['r2'] - pre['r2']:+.4f}")
-
-            post_loss = self.recon_loss(test_tensor, device=device)
-            print(f"[CHECK] Recon MSE (pós-pruning): {post_loss:.6f}")
-
-
-            results.update({
-                "post_loss": post["mse"],
-                "num_pruned": num_prune,
-                "prune_idx": prune_idx.detach().cpu(),
-                "post_kpis": post,
-            })
-
-        return results
-            
-if __name__ == "__main__":
-    sae = Sae()
-    res = sae.train_sae(
-        epochs=10, batch_size=64, lr=1e-3, device="cuda",
-        prune_pct=0.20,             # 20% menos importantes
-        saliency_sample_size=0,     # 0 - sem saliency
-        recovery_epochs=2, recovery_lr=3e-4
-    )
-    print("\nResumo:", {k: (v if k != "prune_idx" else f"tensor[{len(v)}]") for k, v in res.items()})
+sae = Sae()
+metrics, features = sae.train_sae(epochs=10, batch_size=32, lr=1e-3, device="cuda")
         
         

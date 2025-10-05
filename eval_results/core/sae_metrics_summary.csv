@@ -1,0 +1,2 @@
+sae_name,model,eval_type,explained_variance,mse,cosine_similarity,l0,l1,ce_loss_score,l2_ratio,dead_neurons_frac
+meu_sae_treinado,pythia-70m-deduped,core,0.8291,0.0624,0.8596,20.0000,35.8950,0.8004,0.8646,N/A
